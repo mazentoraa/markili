@@ -169,7 +169,7 @@ def main():
         seg_results = segmentation.process(rgb)
         mask = seg_results.segmentation_mask
         condition = np.stack((mask,) * 3, axis=-1) > 0.5  # Adjust threshold if needed
-        frame = np.where(condition, frame, bg_image)
+        frame = np.where(condition, frame)
 
         # Process hands
         results = hands.process(rgb)
@@ -243,14 +243,31 @@ def main():
         # Arrange
         arrange_objects(width, height)
 
+        # Resize bg_image to fit the object size
+        bg_square = cv2.resize(bg_image, (OBJECT_SIZE, OBJECT_SIZE))
+
         # Draw objects
         for obj in own_objects:
+            x, y = int(obj.x), int(obj.y)
+
             if obj.type == 'square':
-                cv2.rectangle(frame, (int(obj.x), int(obj.y)), (int(obj.x + OBJECT_SIZE), int(obj.y + OBJECT_SIZE)), SQUARE_COLOR, -1)
+                # Place the resized background image instead of solid rectangle
+                frame[y:y+OBJECT_SIZE, x:x+OBJECT_SIZE] = bg_square
+
             else:
-                center_x = int(obj.x + OBJECT_SIZE / 2)
-                center_y = int(obj.y + OBJECT_SIZE / 2)
-                cv2.circle(frame, (center_x, center_y), OBJECT_SIZE // 2, CIRCLE_COLOR, -1)
+                # Create a circular mask
+                mask = np.zeros((OBJECT_SIZE, OBJECT_SIZE, 3), dtype=np.uint8)
+                center = (OBJECT_SIZE // 2, OBJECT_SIZE // 2)
+                cv2.circle(mask, center, OBJECT_SIZE // 2, (255, 255, 255), -1)
+
+                # Resize bg image for circle
+                bg_circle = cv2.resize(bg_image, (OBJECT_SIZE, OBJECT_SIZE))
+
+                # Apply mask
+                roi = frame[y:y+OBJECT_SIZE, x:x+OBJECT_SIZE]
+                masked_circle = cv2.bitwise_and(bg_circle, mask)
+                masked_bg = cv2.bitwise_and(roi, cv2.bitwise_not(mask))
+                frame[y:y+OBJECT_SIZE, x:x+OBJECT_SIZE] = cv2.add(masked_circle, masked_bg)
 
         # Timer
         if start_time:
