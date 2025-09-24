@@ -40,11 +40,14 @@ frozen_image = None
 send_streak = 0
 frozen = False
 frozen_start = 0
+conn = None
+width = None
+height = None
 
 # Receiver thread
-def receiver(conn, width, height):
+def receiver():
     global own_objects, game_over, start_time, opponent_sendable, send_streak, frozen, frozen_start
-    while not game_over:
+    while True:
         try:
             data = conn.recv(1024).decode()
             if data == 'start':
@@ -58,10 +61,10 @@ def receiver(conn, width, height):
                 start_y = height - OBJECT_SIZE - 20
                 new_obj = GameObject(start_x, start_y, obj_type)
                 new_obj.is_incoming = True
-                new_obj.target_x = get_next_position(width)
+                new_obj.target_x = get_next_position()
                 new_obj.target_y = start_y
                 own_objects.append(new_obj)
-                send_streak = 0  # Reset streak on receive
+                send_streak = 0
                 print(f"Received a {obj_type}! Now have {len(own_objects)} objects.")
             elif data == 'win':
                 print("You lost! The other player won.")
@@ -73,17 +76,21 @@ def receiver(conn, width, height):
                 frozen = True
                 frozen_start = time.time()
                 print("Frozen by opponent!")
+            elif data == 'restart':
+                reset_game()
+                start_time = time.time()
+                print("Game restarted by opponent!")
         except:
             break
 
 # Calculate next position
-def get_next_position(width):
+def get_next_position():
     num = len(own_objects) + 1
     start_x = (width - (OBJECT_SIZE * num + 10 * (num - 1))) // 2
     return start_x + (num - 1) * (OBJECT_SIZE + 10)
 
 # Arrange non-moving objects
-def arrange_objects(width, height):
+def arrange_objects():
     non_moving = [obj for obj in own_objects if not hasattr(obj, 'is_incoming') or not obj.is_incoming]
     num = len(non_moving)
     start_x = (width - (OBJECT_SIZE * num + 10 * (num - 1))) // 2
@@ -100,7 +107,7 @@ def get_sendable_count():
     return sum(1 for obj in own_objects if obj.type == can_send)
 
 # Draw textured object
-def draw_object(frame, obj, width, height):
+def draw_object(frame, obj):
     x1, y1 = int(obj.x), int(obj.y)
     x2, y2 = x1 + OBJECT_SIZE, y1 + OBJECT_SIZE
     x1 = max(0, min(x1, width - 1))
@@ -117,14 +124,13 @@ def draw_object(frame, obj, width, height):
         fallback_color = CIRCLE_COLOR
     elif obj.type == 'weapon':
         texture = weapon_texture
-        fallback_color = (0, 0, 255)  # Blue fallback for weapon
+        fallback_color = (0, 0, 255)
     else:
         return
 
     roi = frame[y1:y2, x1:x2]
     if roi.shape[0] > 0 and roi.shape[1] > 0:
         if texture is None:
-            # Fallback
             if obj.type == 'circle':
                 center = ((x2 - x1) // 2, (y2 - y1) // 2)
                 cv2.circle(roi, center, min(roi.shape[:2]) // 2, fallback_color, -1)
@@ -145,14 +151,37 @@ def draw_object(frame, obj, width, height):
                 frame[y1:y2, x1:x2] = resized_texture
 
 # Add weapon
-def add_weapon(width, height):
+def add_weapon():
     new_obj = GameObject(0, height - OBJECT_SIZE - 20, 'weapon')
     own_objects.append(new_obj)
     print("Earned a weapon!")
 
+# Reset game state
+def reset_game():
+    global own_objects, selected_object, game_over, start_time, warning_message, warning_start, opponent_sendable, send_streak, frozen, frozen_start
+    own_objects = []
+    num = INITIAL_EACH * 2
+    start_x = (width - (OBJECT_SIZE * num + 10 * (num - 1))) // 2
+    y = height - OBJECT_SIZE - 20
+    for i in range(INITIAL_EACH):
+        x = start_x + i * (OBJECT_SIZE + 10)
+        own_objects.append(GameObject(x, y, 'square'))
+    for i in range(INITIAL_EACH):
+        x = start_x + (INITIAL_EACH + i) * (OBJECT_SIZE + 10)
+        own_objects.append(GameObject(x, y, 'circle'))
+    selected_object = None
+    game_over = False
+    start_time = None if not is_host else time.time()
+    warning_message = ""
+    warning_start = 0
+    opponent_sendable = None
+    send_streak = 0
+    frozen = False
+    frozen_start = 0
+
 # Main function
 def main():
-    global own_objects, selected_object, game_over, is_host, can_send, start_time, warning_message, warning_start, opponent_sendable, square_texture, circle_texture, weapon_texture, frozen_image, send_streak, frozen, frozen_start
+    global own_objects, selected_object, game_over, is_host, can_send, start_time, warning_message, warning_start, opponent_sendable, square_texture, circle_texture, weapon_texture, frozen_image, send_streak, frozen, frozen_start, conn, width, height
 
     # Load textures and images
     square_texture = cv2.imread('player_one.png')
@@ -200,18 +229,10 @@ def main():
         frozen_image = cv2.resize(frozen_image, (width, height))
 
     # Initialize objects
-    num = INITIAL_EACH * 2
-    start_x = (width - (OBJECT_SIZE * num + 10 * (num - 1))) // 2
-    y = height - OBJECT_SIZE - 20
-    for i in range(INITIAL_EACH):
-        x = start_x + i * (OBJECT_SIZE + 10)
-        own_objects.append(GameObject(x, y, 'square'))
-    for i in range(INITIAL_EACH):
-        x = start_x + (INITIAL_EACH + i) * (OBJECT_SIZE + 10)
-        own_objects.append(GameObject(x, y, 'circle'))
+    reset_game()
 
     # Start receiver thread
-    recv_thread = threading.Thread(target=receiver, args=(conn, width, height))
+    recv_thread = threading.Thread(target=receiver, daemon=True)
     recv_thread.start()
 
     if not is_host:
@@ -223,7 +244,7 @@ def main():
     hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7, min_tracking_confidence=0.7)
     mp_draw = mp.solutions.drawing_utils
 
-    while not game_over:
+    while True:
         ret, frame = cap.read()
         if not ret:
             break
@@ -238,7 +259,6 @@ def main():
         if frozen:
             if frozen_image is not None:
                 frame = frozen_image.copy()
-            # Skip hand processing
             hand_detected = False
         else:
             # Process hands
@@ -278,7 +298,7 @@ def main():
                             del own_objects[selected_object]
                             send_streak += 1
                             if send_streak % 2 == 0:
-                                add_weapon(width, height)
+                                add_weapon()
                             sendable_count = get_sendable_count()
                             if sendable_count == 0:
                                 conn.send('win'.encode())
@@ -316,11 +336,11 @@ def main():
                         delattr(obj, 'target_y')
 
         # Arrange
-        arrange_objects(width, height)
+        arrange_objects()
 
         # Draw objects
         for obj in own_objects:
-            draw_object(frame, obj, width, height)
+            draw_object(frame, obj)
 
         # Timer
         if start_time:
@@ -340,6 +360,9 @@ def main():
         else:
             status_text += " (Swipe left)"
         cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+        # Restart instruction
+        cv2.putText(frame, "Press 'r' to restart", (10, height - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         # Warning
         if time.time() - warning_start < WARNING_DURATION:
@@ -363,7 +386,15 @@ def main():
 
         cv2.imshow('Swipe Game', frame)
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('r'):
+            reset_game()
+            conn.send('restart'.encode())
+            if is_host:
+                conn.send('start'.encode())
+                start_time = time.time()
+            print("Game restarted!")
+        elif key == ord('q'):
             break
 
     # Cleanup
