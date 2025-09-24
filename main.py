@@ -1,11 +1,3 @@
-# Updated implementation with object-specific backgrounds (player_one.png for squares, player_two.png for circles) instead of full-frame background.
-# - Each square uses player_one.png as its texture, each circle uses player_two.png.
-# - Host sends only squares, client sends only circles, with warnings for invalid sends.
-# - 60-second timer with timeout win based on fewer sendable objects (host: squares vs client: circles).
-# - Objects (squares/circles) are textured by resizing images to OBJECT_SIZE.
-# - Assumes player_one.png and player_two.png are in the script's directory.
-# - Install dependencies: pip install opencv-python mediapipe numpy.
-
 import cv2
 import mediapipe as mp
 import socket
