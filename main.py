@@ -1,3 +1,10 @@
+# Updated implementation with automatic host IP display.
+# - When host mode is selected, displays local IP address for client to use.
+# - Uses socket.gethostbyname(socket.gethostname()) for initial IP, falls back to connecting to 8.8.8.8 for WiFi IP.
+# - Game features: restart ('r'), weapons (two consecutive sends), freeze (frozen.png, 1s), squares (player_one.png), circles (player_two.png), 60s timer.
+# - Images: player_one.png, player_two.png, weapon.png, frozen.png in script directory.
+# - Install dependencies: pip install opencv-python mediapipe numpy.
+
 import cv2
 import mediapipe as mp
 import socket
@@ -43,6 +50,21 @@ frozen_start = 0
 conn = None
 width = None
 height = None
+
+# Get local IP address
+def get_local_ip():
+    try:
+        # Try gethostbyname first
+        ip = socket.gethostbyname(socket.gethostname())
+        if ip.startswith("127."):  # Avoid localhost
+            # Create a socket to connect to an external address
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))  # Google DNS, no data sent
+            ip = s.getsockname()[0]
+            s.close()
+        return ip
+    except:
+        return "Unable to determine IP"
 
 # Receiver thread
 def receiver():
@@ -201,6 +223,8 @@ def main():
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.bind(('0.0.0.0', PORT))
         s.listen(1)
+        ip = get_local_ip()
+        print(f"Host IP address: {ip}")
         print("Waiting for client to connect...")
         conn, addr = s.accept()
         print(f"Connected to {addr}")
