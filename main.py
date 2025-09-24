@@ -246,21 +246,26 @@ def main():
         # Resize bg_image to fit the object size
         bg_square = cv2.resize(bg_image, (OBJECT_SIZE, OBJECT_SIZE))
 
-        # Draw objects
+        # Draw objects with image background
         for obj in own_objects:
             x, y = int(obj.x), int(obj.y)
 
+            # Skip if object would go outside frame
+            if x < 0 or y < 0 or x + OBJECT_SIZE > width or y + OBJECT_SIZE > height:
+                continue
+
             if obj.type == 'square':
-                # Place the resized background image instead of solid rectangle
+                # Resize bg_image to fit square
+                bg_square = cv2.resize(bg_image, (OBJECT_SIZE, OBJECT_SIZE))
                 frame[y:y+OBJECT_SIZE, x:x+OBJECT_SIZE] = bg_square
 
             else:
-                # Create a circular mask
+                # Circle: create circular mask
                 mask = np.zeros((OBJECT_SIZE, OBJECT_SIZE, 3), dtype=np.uint8)
                 center = (OBJECT_SIZE // 2, OBJECT_SIZE // 2)
                 cv2.circle(mask, center, OBJECT_SIZE // 2, (255, 255, 255), -1)
 
-                # Resize bg image for circle
+                # Resize background for circle
                 bg_circle = cv2.resize(bg_image, (OBJECT_SIZE, OBJECT_SIZE))
 
                 # Apply mask
