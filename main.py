@@ -1,3 +1,11 @@
+# Updated implementation with object-specific backgrounds (player_one.png for squares, player_two.png for circles) instead of full-frame background.
+# - Each square uses player_one.png as its texture, each circle uses player_two.png.
+# - Host sends only squares, client sends only circles, with warnings for invalid sends.
+# - 60-second timer with timeout win based on fewer sendable objects (host: squares vs client: circles).
+# - Objects (squares/circles) are textured by resizing images to OBJECT_SIZE.
+# - Assumes player_one.png and player_two.png are in the script's directory.
+# - Install dependencies: pip install opencv-python mediapipe numpy.
+
 import cv2
 import mediapipe as mp
 import socket
@@ -8,12 +16,12 @@ import numpy as np
 # Game settings
 INITIAL_EACH = 5
 OBJECT_SIZE = 50
-SQUARE_COLOR = (0, 255, 0)
-CIRCLE_COLOR = (255, 0, 0)
+SQUARE_COLOR = (0, 255, 0)  # Fallback if image fails
+CIRCLE_COLOR = (255, 0, 0)  # Fallback if image fails
 ANIMATION_SPEED = 20
 PORT = 12345
-GAME_TIME = 60  # seconds
-WARNING_DURATION = 3  # seconds
+GAME_TIME = 60
+WARNING_DURATION = 3
 
 # Object class
 class GameObject:
@@ -27,11 +35,13 @@ own_objects = []
 selected_object = None
 game_over = False
 is_host = False
-can_send = None  # 'square' or 'circle'
+can_send = None
 start_time = None
 warning_message = ""
 warning_start = 0
 opponent_sendable = None
+square_texture = None
+circle_texture = None
 
 # Receiver thread
 def receiver(conn, width, height):
@@ -85,9 +95,55 @@ def arrange_objects(width, height):
 def get_sendable_count():
     return sum(1 for obj in own_objects if obj.type == can_send)
 
+# Draw textured object
+def draw_object(frame, obj, width, height):
+    x1, y1 = int(obj.x), int(obj.y)
+    x2, y2 = x1 + OBJECT_SIZE, y1 + OBJECT_SIZE
+    # Ensure within bounds
+    x1 = max(0, min(x1, width - 1))
+    y1 = max(0, min(y1, height - 1))
+    x2 = max(0, min(x2, width))
+    y2 = max(0, min(y2, height))
+    if x2 <= x1 or y2 <= y1:
+        return
+    # Select texture
+    texture = square_texture if obj.type == 'square' else circle_texture
+    if texture is None:
+        # Fallback: draw shape
+        if obj.type == 'square':
+            cv2.rectangle(frame, (x1, y1), (x2, y2), SQUARE_COLOR, -1)
+        else:
+            center_x = (x1 + x2) // 2
+            center_y = (y1 + y2) // 2
+            cv2.circle(frame, (center_x, center_y), OBJECT_SIZE // 2, CIRCLE_COLOR, -1)
+    else:
+        # Apply texture
+        roi = frame[y1:y2, x1:x2]
+        if roi.shape[0] > 0 and roi.shape[1] > 0:
+            resized_texture = cv2.resize(texture, (x2 - x1, y2 - y1))
+            if obj.type == 'circle':
+                # Create circular mask
+                mask = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+                center = ((x2 - x1) // 2, (y2 - y1) // 2)
+                radius = (x2 - x1) // 2
+                cv2.circle(mask, center, radius, 255, -1)
+                masked_texture = cv2.bitwise_and(resized_texture, resized_texture, mask=mask)
+                inv_mask = cv2.bitwise_not(mask)
+                masked_roi = cv2.bitwise_and(roi, roi, mask=inv_mask)
+                frame[y1:y2, x1:x2] = cv2.add(masked_texture, masked_roi)
+            else:
+                # Square: apply directly
+                frame[y1:y2, x1:x2] = resized_texture
+
 # Main function
 def main():
-    global own_objects, selected_object, game_over, is_host, can_send, start_time, warning_message, warning_start, opponent_sendable
+    global own_objects, selected_object, game_over, is_host, can_send, start_time, warning_message, warning_start, opponent_sendable, square_texture, circle_texture
+
+    # Load textures
+    square_texture = cv2.imread('player_one.png')
+    circle_texture = cv2.imread('player_two.png')
+    if square_texture is None or circle_texture is None:
+        print("Warning: Could not load one or both texture images. Using fallback colors.")
 
     # Setup socket
     mode = input("Are you the host (type 'host') or client (type 'client')? ").strip().lower()
@@ -121,7 +177,7 @@ def main():
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # Initialize objects: 5 squares, 5 circles
+    # Initialize objects
     num = INITIAL_EACH * 2
     start_x = (width - (OBJECT_SIZE * num + 10 * (num - 1))) // 2
     y = height - OBJECT_SIZE - 20
@@ -137,24 +193,13 @@ def main():
     recv_thread.start()
 
     if not is_host:
-        # Client waits for 'start'
         while start_time is None:
             time.sleep(0.1)
 
-    # Setup MediaPipe
+    # Setup MediaPipe Hands
     mp_hands = mp.solutions.hands
     hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7, min_tracking_confidence=0.7)
     mp_draw = mp.solutions.drawing_utils
-    mp_selfie = mp.solutions.selfie_segmentation
-    segmentation = mp_selfie.SelfieSegmentation(model_selection=0)
-
-    # Load background
-    bg_image = cv2.imread('player_one.png' if is_host else 'player_two.png')
-    if bg_image is None:
-        print("Error: Could not load background image. Using black background.")
-        bg_image = np.zeros((height, width, 3), dtype=np.uint8)
-    else:
-        bg_image = cv2.resize(bg_image, (width, height))
 
     while not game_over:
         ret, frame = cap.read()
@@ -164,14 +209,8 @@ def main():
         # Flip frame
         frame = cv2.flip(frame, 1)
 
-        # Selfie segmentation
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        seg_results = segmentation.process(rgb)
-        mask = seg_results.segmentation_mask
-        condition = np.stack((mask,) * 3, axis=-1) > 0.5  # Adjust threshold if needed
-        frame = np.where(condition, frame, bg_image)
-
         # Process hands
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = hands.process(rgb)
 
         hand_detected = results.multi_hand_landmarks is not None
@@ -186,7 +225,6 @@ def main():
 
                 if selected_object is None:
                     for i, obj in enumerate(own_objects):
-                        # Overlap check (approx for circle)
                         if obj.x < index_x < obj.x + OBJECT_SIZE and obj.y < index_y < obj.y + OBJECT_SIZE:
                             selected_object = i
                             break
@@ -196,7 +234,6 @@ def main():
                     obj.x = index_x - OBJECT_SIZE / 2
                     obj.y = index_y - OBJECT_SIZE / 2
 
-                    # Check if swiped off-screen
                     off_screen = (is_host and obj.x + OBJECT_SIZE > width) or (not is_host and obj.x < 0)
                     if off_screen:
                         if obj.type == can_send:
@@ -210,9 +247,8 @@ def main():
                                 game_over = True
                             selected_object = None
                         else:
-                            warning_message = "Cannot send this shape!"
+                            warning_message = f"Cannot send {obj.type}s!"
                             warning_start = time.time()
-                            # Bring back on-screen
                             if is_host:
                                 obj.x = width - OBJECT_SIZE
                             else:
@@ -245,12 +281,7 @@ def main():
 
         # Draw objects
         for obj in own_objects:
-            if obj.type == 'square':
-                cv2.rectangle(frame, (int(obj.x), int(obj.y)), (int(obj.x + OBJECT_SIZE), int(obj.y + OBJECT_SIZE)), SQUARE_COLOR, -1)
-            else:
-                center_x = int(obj.x + OBJECT_SIZE / 2)
-                center_y = int(obj.y + OBJECT_SIZE / 2)
-                cv2.circle(frame, (center_x, center_y), OBJECT_SIZE // 2, CIRCLE_COLOR, -1)
+            draw_object(frame, obj, width, height)
 
         # Timer
         if start_time:
@@ -261,7 +292,7 @@ def main():
             if remaining_time <= 0 and not game_over:
                 local_sendable = get_sendable_count()
                 conn.send(f'timeout:{local_sendable}'.encode())
-                game_over = True  # Winner determined when both have sent/received
+                game_over = True
 
         # Status
         status_text = f"Objects: {len(own_objects)} (Send {can_send}s)"
@@ -275,7 +306,7 @@ def main():
         if time.time() - warning_start < WARNING_DURATION:
             cv2.putText(frame, warning_message, (width // 2 - 150, height // 2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
-        # After timeout, determine winner if opponent_sendable received
+        # Timeout winner
         if game_over and opponent_sendable is not None:
             local_sendable = get_sendable_count()
             if local_sendable < opponent_sendable:
