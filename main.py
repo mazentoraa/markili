@@ -8,19 +8,20 @@ import numpy as np
 # Game settings
 INITIAL_EACH = 5
 OBJECT_SIZE = 50
-SQUARE_COLOR = (0, 255, 0)  # Fallback if image fails
-CIRCLE_COLOR = (255, 0, 0)  # Fallback if image fails
+SQUARE_COLOR = (0, 255, 0)  # Fallback
+CIRCLE_COLOR = (255, 0, 0)  # Fallback
 ANIMATION_SPEED = 20
 PORT = 12345
 GAME_TIME = 60
 WARNING_DURATION = 3
+FREEZE_DURATION = 1
 
 # Object class
 class GameObject:
     def __init__(self, x, y, obj_type):
         self.x = x
         self.y = y
-        self.type = obj_type  # 'square' or 'circle'
+        self.type = obj_type  # 'square', 'circle', 'weapon'
 
 # Global variables
 own_objects = []
@@ -34,10 +35,15 @@ warning_start = 0
 opponent_sendable = None
 square_texture = None
 circle_texture = None
+weapon_texture = None
+frozen_image = None
+send_streak = 0
+frozen = False
+frozen_start = 0
 
 # Receiver thread
 def receiver(conn, width, height):
-    global own_objects, game_over, start_time, opponent_sendable
+    global own_objects, game_over, start_time, opponent_sendable, send_streak, frozen, frozen_start
     while not game_over:
         try:
             data = conn.recv(1024).decode()
@@ -55,6 +61,7 @@ def receiver(conn, width, height):
                 new_obj.target_x = get_next_position(width)
                 new_obj.target_y = start_y
                 own_objects.append(new_obj)
+                send_streak = 0  # Reset streak on receive
                 print(f"Received a {obj_type}! Now have {len(own_objects)} objects.")
             elif data == 'win':
                 print("You lost! The other player won.")
@@ -62,6 +69,10 @@ def receiver(conn, width, height):
             elif data.startswith('timeout:'):
                 opponent_sendable = int(data[8:])
                 game_over = True
+            elif data == 'freeze':
+                frozen = True
+                frozen_start = time.time()
+                print("Frozen by opponent!")
         except:
             break
 
@@ -73,12 +84,13 @@ def get_next_position(width):
 
 # Arrange non-moving objects
 def arrange_objects(width, height):
-    num = len([obj for obj in own_objects if not hasattr(obj, 'is_incoming') or not obj.is_incoming])
+    non_moving = [obj for obj in own_objects if not hasattr(obj, 'is_incoming') or not obj.is_incoming]
+    num = len(non_moving)
     start_x = (width - (OBJECT_SIZE * num + 10 * (num - 1))) // 2
     y = height - OBJECT_SIZE - 20
     idx = 0
     for obj in own_objects:
-        if selected_object != own_objects.index(obj) and (not hasattr(obj, 'is_incoming') or not obj.is_incoming):
+        if (selected_object is None or own_objects.index(obj) != selected_object) and (not hasattr(obj, 'is_incoming') or not obj.is_incoming):
             obj.x = start_x + idx * (OBJECT_SIZE + 10)
             obj.y = y
             idx += 1
@@ -91,51 +103,66 @@ def get_sendable_count():
 def draw_object(frame, obj, width, height):
     x1, y1 = int(obj.x), int(obj.y)
     x2, y2 = x1 + OBJECT_SIZE, y1 + OBJECT_SIZE
-    # Ensure within bounds
     x1 = max(0, min(x1, width - 1))
     y1 = max(0, min(y1, height - 1))
     x2 = max(0, min(x2, width))
     y2 = max(0, min(y2, height))
     if x2 <= x1 or y2 <= y1:
         return
-    # Select texture
-    texture = square_texture if obj.type == 'square' else circle_texture
-    if texture is None:
-        # Fallback: draw shape
-        if obj.type == 'square':
-            cv2.rectangle(frame, (x1, y1), (x2, y2), SQUARE_COLOR, -1)
-        else:
-            center_x = (x1 + x2) // 2
-            center_y = (y1 + y2) // 2
-            cv2.circle(frame, (center_x, center_y), OBJECT_SIZE // 2, CIRCLE_COLOR, -1)
+    if obj.type == 'square':
+        texture = square_texture
+        fallback_color = SQUARE_COLOR
+    elif obj.type == 'circle':
+        texture = circle_texture
+        fallback_color = CIRCLE_COLOR
+    elif obj.type == 'weapon':
+        texture = weapon_texture
+        fallback_color = (0, 0, 255)  # Blue fallback for weapon
     else:
-        # Apply texture
-        roi = frame[y1:y2, x1:x2]
-        if roi.shape[0] > 0 and roi.shape[1] > 0:
+        return
+
+    roi = frame[y1:y2, x1:x2]
+    if roi.shape[0] > 0 and roi.shape[1] > 0:
+        if texture is None:
+            # Fallback
+            if obj.type == 'circle':
+                center = ((x2 - x1) // 2, (y2 - y1) // 2)
+                cv2.circle(roi, center, min(roi.shape[:2]) // 2, fallback_color, -1)
+            else:
+                cv2.rectangle(roi, (0, 0), (roi.shape[1], roi.shape[0]), fallback_color, -1)
+        else:
             resized_texture = cv2.resize(texture, (x2 - x1, y2 - y1))
             if obj.type == 'circle':
-                # Create circular mask
                 mask = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
                 center = ((x2 - x1) // 2, (y2 - y1) // 2)
-                radius = (x2 - x1) // 2
+                radius = min((x2 - x1) // 2, (y2 - y1) // 2)
                 cv2.circle(mask, center, radius, 255, -1)
                 masked_texture = cv2.bitwise_and(resized_texture, resized_texture, mask=mask)
                 inv_mask = cv2.bitwise_not(mask)
                 masked_roi = cv2.bitwise_and(roi, roi, mask=inv_mask)
                 frame[y1:y2, x1:x2] = cv2.add(masked_texture, masked_roi)
             else:
-                # Square: apply directly
                 frame[y1:y2, x1:x2] = resized_texture
+
+# Add weapon
+def add_weapon(width, height):
+    new_obj = GameObject(0, height - OBJECT_SIZE - 20, 'weapon')
+    own_objects.append(new_obj)
+    print("Earned a weapon!")
 
 # Main function
 def main():
-    global own_objects, selected_object, game_over, is_host, can_send, start_time, warning_message, warning_start, opponent_sendable, square_texture, circle_texture
+    global own_objects, selected_object, game_over, is_host, can_send, start_time, warning_message, warning_start, opponent_sendable, square_texture, circle_texture, weapon_texture, frozen_image, send_streak, frozen, frozen_start
 
-    # Load textures
+    # Load textures and images
     square_texture = cv2.imread('player_one.png')
     circle_texture = cv2.imread('player_two.png')
-    if square_texture is None or circle_texture is None:
-        print("Warning: Could not load one or both texture images. Using fallback colors.")
+    weapon_texture = cv2.imread('weapon.png')
+    frozen_image = cv2.imread('frozen.png')
+    if square_texture is None or circle_texture is None or weapon_texture is None:
+        print("Warning: Could not load one or more texture images. Using fallback colors.")
+    if frozen_image is None:
+        print("Warning: Could not load frozen.png. No frozen background will be used.")
 
     # Setup socket
     mode = input("Are you the host (type 'host') or client (type 'client')? ").strip().lower()
@@ -169,6 +196,9 @@ def main():
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+    if frozen_image is not None:
+        frozen_image = cv2.resize(frozen_image, (width, height))
+
     # Initialize objects
     num = INITIAL_EACH * 2
     start_x = (width - (OBJECT_SIZE * num + 10 * (num - 1))) // 2
@@ -201,11 +231,20 @@ def main():
         # Flip frame
         frame = cv2.flip(frame, 1)
 
-        # Process hands
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = hands.process(rgb)
+        # Check frozen
+        if frozen and time.time() - frozen_start > FREEZE_DURATION:
+            frozen = False
 
-        hand_detected = results.multi_hand_landmarks is not None
+        if frozen:
+            if frozen_image is not None:
+                frame = frozen_image.copy()
+            # Skip hand processing
+            hand_detected = False
+        else:
+            # Process hands
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = hands.process(rgb)
+            hand_detected = results.multi_hand_landmarks is not None
 
         if hand_detected:
             for hand_lms in results.multi_hand_landmarks:
@@ -228,10 +267,18 @@ def main():
 
                     off_screen = (is_host and obj.x + OBJECT_SIZE > width) or (not is_host and obj.x < 0)
                     if off_screen:
-                        if obj.type == can_send:
+                        if obj.type == 'weapon':
+                            conn.send('freeze'.encode())
+                            print("Sent weapon! Freezing opponent.")
+                            del own_objects[selected_object]
+                            selected_object = None
+                        elif obj.type == can_send:
                             conn.send(f'send:{obj.type}'.encode())
                             print(f"Sent a {obj.type}! Remaining objects: {len(own_objects) - 1}")
                             del own_objects[selected_object]
+                            send_streak += 1
+                            if send_streak % 2 == 0:
+                                add_weapon(width, height)
                             sendable_count = get_sendable_count()
                             if sendable_count == 0:
                                 conn.send('win'.encode())
@@ -297,6 +344,10 @@ def main():
         # Warning
         if time.time() - warning_start < WARNING_DURATION:
             cv2.putText(frame, warning_message, (width // 2 - 150, height // 2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+        # Frozen text
+        if frozen:
+            cv2.putText(frame, "Frozen!", (width // 2 - 100, height // 2), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 0, 0), 3)
 
         # Timeout winner
         if game_over and opponent_sendable is not None:
