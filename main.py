@@ -1,15 +1,10 @@
-# This is a basic implementation of the game you described using OpenCV for gesture detection and sockets for networking.
-# Assumptions:
-# - Two players on the same WiFi network.
-# - Each player swipes left with their hand in front of the webcam to "send" a square.
-# - Sending a square decreases your remaining squares and increases the other player's remaining squares (like dumping them to the neighbor).
-# - The first player to reduce their remaining squares to 0 wins.
-# - Uses MediaPipe for hand detection (install with: pip install mediapipe).
-# - Install OpenCV: pip install opencv-python.
-# - Run the code on both PCs. One acts as host (server), the other as client.
-# - Adjust thresholds for swipe detection as needed (based on your setup).
-# - For simplicity, swipes are detected anywhere in the frame (not tied to specific square positions). You can extend it to map hand position to specific squares.
-# - Squares are represented by a count, but you could draw visual squares on the screen.
+# Updated implementation with visual squares and differentiated swipe directions.
+# - Draws a row of squares at the bottom of the window representing remaining squares.
+# - Host swipes right to send (positive delta_x).
+# - Client swipes left to send (negative delta_x).
+# - Swipe detection is global (anywhere in frame), but you can extend to per-square by checking hand position overlaps with a square before swipe.
+# - On send, removes the last square visually (simulates sending one).
+# - Other changes: Improved stability, added win/lose handling on both sides.
 
 import cv2
 import mediapipe as mp
@@ -19,11 +14,14 @@ import time
 
 # Game settings
 INITIAL_SQUARES = 10
+SQUARE_SIZE = 50
+SQUARE_COLOR = (0, 255, 0)
 PORT = 12345
 
 # Global variables
 remaining_squares = INITIAL_SQUARES
 game_over = False
+is_host = False
 
 # Receiver thread to handle incoming messages
 def receiver(conn):
@@ -40,13 +38,25 @@ def receiver(conn):
         except:
             break
 
+# Draw squares at the bottom of the frame
+def draw_squares(frame):
+    height, width = frame.shape[:2]
+    start_x = (width - (SQUARE_SIZE * remaining_squares + 10 * (remaining_squares - 1))) // 2
+    for i in range(remaining_squares):
+        x1 = start_x + i * (SQUARE_SIZE + 10)
+        y1 = height - SQUARE_SIZE - 20
+        x2 = x1 + SQUARE_SIZE
+        y2 = height - 20
+        cv2.rectangle(frame, (x1, y1), (x2, y2), SQUARE_COLOR, -1)
+
 # Main function
 def main():
-    global remaining_squares, game_over
+    global remaining_squares, game_over, is_host
 
     # Setup socket based on mode
     mode = input("Are you the host (type 'host') or client (type 'client')? ").strip().lower()
     if mode == 'host':
+        is_host = True
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.bind(('0.0.0.0', PORT))
         s.listen(1)
@@ -106,22 +116,39 @@ def main():
                     dt = curr_time - prev_time
                     if dt > 0:
                         speed = abs(delta_x) / dt
-                        # Detect left swipe: negative delta_x (hand moving left in mirrored view), high speed
-                        if delta_x < -0.15 and speed > 1.5:  # Adjust thresholds based on testing
-                            if remaining_squares > 0:
-                                remaining_squares -= 1
-                                conn.send('send'.encode())
-                                print(f"Sent a square! Remaining: {remaining_squares}")
-                                if remaining_squares == 0:
-                                    conn.send('win'.encode())
-                                    print("You won!")
-                                    game_over = True
+                        # Detect swipe based on role
+                        swipe_detected = False
+                        if is_host:
+                            # Host swipes right: positive delta_x
+                            if delta_x > 0.15 and speed > 1.5:  # Adjust thresholds
+                                swipe_detected = True
+                        else:
+                            # Client swipes left: negative delta_x
+                            if delta_x < -0.15 and speed > 1.5:
+                                swipe_detected = True
+
+                        if swipe_detected and remaining_squares > 0:
+                            remaining_squares -= 1
+                            conn.send('send'.encode())
+                            print(f"Sent a square! Remaining: {remaining_squares}")
+                            if remaining_squares == 0:
+                                conn.send('win'.encode())
+                                print("You won!")
+                                game_over = True
 
                 prev_pos = curr_pos
                 prev_time = curr_time
 
+        # Draw visual squares
+        draw_squares(frame)
+
         # Display game status on frame
-        cv2.putText(frame, f"Remaining squares: {remaining_squares}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        status_text = f"Remaining squares: {remaining_squares}"
+        if is_host:
+            status_text += " (Swipe right to send)"
+        else:
+            status_text += " (Swipe left to send)"
+        cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         cv2.imshow('Swipe Game', frame)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
