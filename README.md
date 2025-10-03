@@ -83,6 +83,7 @@ This project was made during the **Integration Day of ISIMM** (Higher Institute 
 2. Select 'host' when prompted.
 3. Note the displayed IP address (e.g., Host IP address: 192.168.1.100).
 4. Wait for the client to connect.
+
 **Start the Client**:
 1. Run python main.py on the second PC.
 2. Select 'client' and enter the host's IP address.
